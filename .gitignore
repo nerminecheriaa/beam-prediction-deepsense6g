@@ -218,3 +218,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Donnees et modeles (trop lourds)
+data/
+*.pth
+*.pt
+*.zip
+checkpoints/
