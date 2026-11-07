@@ -13,7 +13,7 @@ class RadarCNN(nn.Module):
         super().__init__()
         self.features = nn.Sequential(_block(1, 16), _block(16, 32), _block(32, 64), _block(64, 128),
                                       nn.AdaptiveAvgPool2d(1), nn.Flatten())
-        self.head = nn.Linear(128, n_beams)
+        self.head = nn.Sequential(nn.Dropout(0.3), nn.Linear(128, n_beams))
 
     def forward(self, x):
         return self.head(self.features(x))
