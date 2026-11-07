@@ -112,9 +112,12 @@ def augment_photometric(x, cutout_p=0.5):
     return x.clamp_(0, 1)
  
 
-def to_model_input(x_uint8, device):
-    """uint8 (B,3,H,W) -> float normalisé ImageNet, directement sur le GPU."""
+def to_model_input(x_uint8, device, augment=False):
+    """uint8 (B,3,H,W) -> float normalisé ImageNet, directement sur le GPU.
+    augment=True seulement pendant l'entraînement (jamais en val/test)."""
     mean = torch.tensor(IMAGENET_MEAN, device=device).view(1, 3, 1, 1)
     std = torch.tensor(IMAGENET_STD, device=device).view(1, 3, 1, 1)
     x = x_uint8.to(device, non_blocking=True).float().div_(255.0)
+    if augment:
+        x = augment_photometric(x)
     return (x - mean) / std
