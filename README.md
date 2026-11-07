@@ -128,13 +128,34 @@ Avec les valeurs par défaut (`augment=False`, `soft_sigma=0`), l'entraînement 
 
 ### 4. Radar et fusion : `B_radar_fusion.ipynb`
 
-<!-- Partie B : à compléter par Mériem (ordre des cellules, durées, fichiers produits) -->
+Le notebook se lit et s'exécute de haut en bas. Les graines sont les mêmes que pour la caméra (0 à 4) : la graine `s` de la caméra est associée à la graine `s` du radar. Les résultats déjà sauvegardés sur Drive sont rechargés au lieu d'être recalculés.
 
-- carte distance-angle 64x256 : FFT distance, FFT Doppler avec suppression des composantes de vitesse nulle (échos fixes), FFT angle sur les 4 antennes ; cache `beam_data_B/radar_maps_dop.npy` ;
-- CNN radar, puis deux fusions avec la caméra :
-  - concaténation des features caméra (ResNet18 ImageNet non affiné) et radar ;
-  - fusion tardive : `w * softmax(caméra) + (1 - w) * softmax(radar)`, avec `w` choisi sur la validation ;
-- la caméra est lue dans `camera/seeds_final/camera_outputs_seed{s}.pt` ; l'alignement avec le radar se fait sur la colonne `index` de `splits.csv`.
+| Étape | Ce que fait la cellule | Produit |
+|---|---|---|
+| 1 | monte Drive, décompresse les données, clone le dépôt | |
+| 2 | charge `splits.csv`, les cartes radar et les sorties caméra de `seeds_final` ; vérifie l'alignement sur `index` | message `alignement caméra OK` |
+| 3 | CNN radar seul sur 5 graines | `beam_data_B/radar_seeds/radar_logits_seed{s}.pt` |
+| 4 | fusion tardive sur 5 graines ; le poids `w_cam` est choisi sur la validation, graine par graine | |
+| 5 | fusion par concaténation sur 5 graines | |
+| 6 | tableau final (moyenne ± écart-type, K pour 50 %, gain d'overhead) | `beam_data_B/resultats_final.csv` |
+| 7 | courbes Top-K moyennes avec bande ± écart-type | `beam_data_B/topk_curves_final.png` |
+
+Si `radar_maps_dop.npy` n'existe pas encore, l'étape 2 le calcule (environ 7 minutes, une seule fois, car il y a 3 235 cubes radar à transformer).
+
+**Prétraitement radar** (`src/radar.py`). Chaque cube (4 antennes, 256 échantillons, 250 chirps, complexe) devient une carte distance-angle 64 x 256 normalisée entre 0 et 1 :
+1. fenêtre de Hann, puis FFT sur les échantillons (distance) et sur les chirps (Doppler) ;
+2. mise à zéro des cases Doppler proches de 0 : cela retire les échos fixes qui, sinon, dominent toute la carte ;
+3. FFT sur les 4 antennes, avec zero-padding à 64 points (angle) ;
+4. maximum du module sur le Doppler, puis log et écrêtage au 99,5e percentile.
+
+Sans l'étape 2, les cartes de séquences très différentes étaient presque identiques (une raie verticale due à un écho fixe). La version de référence est `method="doppler"` ; l'ancienne `method="mean"` reste dans le code pour comparaison.
+
+**Modèles** (`src/radar_models.py`) :
+- `RadarCNN` : 4 blocs convolutifs (16, 32, 64, 128 canaux), pooling moyen global, dropout 0,3, 64 sorties ;
+- fusion par concaténation (`FusionNet`) : 512 features caméra + 128 features radar, puis un petit perceptron. Les features caméra viennent du **ResNet18 ImageNet non affiné** : celles du modèle affiné (100 % sur le train) sont « trop parfaites » sur le train et feraient surapprendre la fusion ;
+- fusion tardive (`late_fusion`) : `w * softmax(caméra) + (1 - w) * softmax(radar)`. Un seul paramètre, `w`, choisi sur la validation (critère : Top-1 + Top-3 + Top-5), sans jamais regarder le test.
+
+Entraînement radar et fusion : Adam, lr 5e-4, weight decay 1e-4, 20 époques, batch 32 ; l'époque conservée est celle du meilleur Top-1 sur la validation.
 
 ## Fichiers échangés entre les deux parties
 
@@ -154,6 +175,10 @@ m = (df["split"] == "test").values
 assert (df["index"].values[m] == co["test"]["index"].numpy()).all()
 ```
 
+`beam_data_B/radar_seeds/radar_logits_seed{s}.pt` (partie B, un fichier par graine) contient un dictionnaire avec les logits du radar seul (`val` et `test`, de forme N x 64, triés par `index`) et la graine (`seed`).
+
+`beam_data_B/radar_maps_dop.npy` : les cartes radar, de forme (3 235, 1, 64, 256), en float16, dans l'ordre de `splits.csv`.
+
 ## Résultats
 
 Test (480 échantillons, séquences 3 et 14), moyenne ± écart-type sur 5 graines, en %.
@@ -163,9 +188,9 @@ Test (480 échantillons, séquences 3 et 14), moyenne ± écart-type sur 5 grain
 | Faisceau le plus fréquent du train | 13,1 | 36,3 | 42,3 |
 | Caméra, sans régularisation (A1) | 16,1 ± 3,7 | 33,8 ± 4,8 | 45,9 ± 4,1 |
 | Caméra, `aug_soft` (finale) | 16,2 ± 2,9 | 38,0 ± 2,4 | 49,3 ± 2,3 |
-| Radar seul | à compléter | | |
-| Fusion par concaténation | à compléter | | |
-| Fusion tardive | à compléter | | |
+| Radar seul | 17,0 ± 1,9 | 34,8 ± 1,9 | 43,3 ± 0,4 |
+| Fusion par concaténation | 13,7 ± 3,3 | 32,1 ± 6,0 | 39,8 ± 5,3 |
+| Fusion tardive (caméra `aug_soft` + radar) | 17,7 ± 3,6 | 41,9 ± 3,5 | 56,0 ± 4,6 |
 
 Comparaison des variantes caméra sur la validation (5 graines) :
 
@@ -181,13 +206,30 @@ Ce qu'on en retient pour la caméra :
 - sur le test, `aug_soft` gagne en Top-3 et Top-5 par rapport à A1, pas en Top-1, et les résultats varient deux fois moins d'une graine à l'autre ;
 - le gain est plus faible sur le test que sur la validation : le test ne compte que deux séquences, dont l'une représente 78 % des échantillons.
 
-**Overhead.** Prédire le Top-K revient à tester K faisceaux au lieu de 64, soit 1 - K/64 de mesures en moins (98,4 % pour K = 1, 95,3 % pour K = 3, 92,2 % pour K = 5). Le nombre de faisceaux à tester pour trouver le bon dans 50 % des cas est calculé dans `B_radar_fusion.ipynb` (à compléter).
+**Overhead.** Prédire le Top-K revient à tester K faisceaux au lieu de 64, soit 1 - K/64 de mesures en moins (98,4 % pour K = 1, 95,3 % pour K = 3, 92,2 % pour K = 5). Ce gain ne dépend que de K : ce qui change d'une méthode à l'autre est la précision obtenue à K fixé. Le tableau ci-dessous donne le nombre de faisceaux à tester pour trouver le bon dans au moins 50 % des cas (calculé pour chaque graine, puis moyenné).
+
+| Méthode | Faisceaux testés pour 50 % de réussite | Mesures économisées sur 64 |
+|---|---|---|
+| Faisceau le plus fréquent | 9,0 | 85,9 % |
+| Caméra `aug_soft` | 5,8 | 90,9 % |
+| Radar seul | 8,6 | 86,6 % |
+| Fusion par concaténation | 9,2 | 85,6 % |
+| Fusion tardive | 4,8 | 92,5 % |
+
+Les courbes Top-K complètes (K de 1 à 20, bande ± écart-type) sont dans `topk_curves_final.png`.
+
+**Ce qu'on en retient pour le radar et la fusion :**
+- la fusion tardive est la meilleure sur toute la plage de K testée ; par rapport à la caméra seule, elle gagne en moyenne 1,5 point en Top-1, 3,9 en Top-3 et 6,8 en Top-5 ; les poids `w_cam` choisis sur la validation valent 0,7 (0,8 pour la graine 3), donc le radar compte pour environ 30 % ;
+- le radar seul reste proche du plancher : au-dessus en Top-1, pas en Top-3 ; avec 4 antennes, sa résolution angulaire est faible et il perçoit aussi des objets fixes ;
+- la concaténation n'apporte rien et varie beaucoup d'une graine à l'autre : un réseau d'environ 300 000 paramètres (CNN radar et tête de fusion) entraîné sur 2 265 images très corrélées apprend le train par cœur, alors que la fusion tardive n'a qu'un seul paramètre à régler.
 
 ## Limites
 
 - Un seul scénario, 15 séquences au total : 10 pour l'entraînement, 2 pour le test. Les écarts de quelques points entre méthodes restent dans la variabilité.
 - La caméra ne sait pas quel véhicule porte l'émetteur quand plusieurs objets sont visibles.
-- Le radar n'a que 4 antennes, donc une résolution angulaire faible.
+- Le radar n'a que 4 antennes, donc une résolution angulaire faible ; son apport varie d'une séquence de test à l'autre.
+- Les écarts-types sont calculés entre graines : ils ne mesurent pas la variabilité entre scènes. Avec deux séquences de test, les gains de la fusion sont à lire comme une tendance, pas comme une preuve statistique.
+- Le poids de la fusion tardive est choisi sur trois séquences de validation seulement.
 - Les chemins sont ceux de Colab et de notre Drive (`/content/...`, `MyDrive/beam_data/...`) ; ils sont à adapter pour une autre installation.
 
 ## Référence
