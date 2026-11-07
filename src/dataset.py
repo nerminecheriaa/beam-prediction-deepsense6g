@@ -86,6 +86,32 @@ def make_loader(images, labels, batch_size=64, shuffle=False):
                                        num_workers=0, pin_memory=True)
 
 
+
+def augment_photometric(x, cutout_p=0.5):
+    """Augmentation SANS géométrie (la position du véhicule fixe le faisceau).
+    x : float (B,3,H,W) dans [0,1], sur le GPU.
+      - luminosité, contraste, saturation : facteurs aléatoires dans [0,8 ; 1,2] par image
+      - cutout : avec probabilité cutout_p, un carré gris de taille H/4 x W/4 à position aléatoire
+    """
+    B, _, H, W = x.shape
+    dev = x.device
+    rnd = lambda: 1 + (torch.rand(B, 1, 1, 1, device=dev) - 0.5) * 0.4
+    x = x * rnd()                                             # luminosité
+    m = x.mean(dim=(1, 2, 3), keepdim=True)
+    x = (x - m) * rnd() + m                                   # contraste
+    g = x.mean(dim=1, keepdim=True)
+    x = (x - g) * rnd() + g                                   # saturation
+    ph, pw = H // 4, W // 4
+    ys = torch.randint(0, H - ph + 1, (B, 1, 1), device=dev)
+    xs = torch.randint(0, W - pw + 1, (B, 1, 1), device=dev)
+    rows = torch.arange(H, device=dev).view(1, H, 1)
+    cols = torch.arange(W, device=dev).view(1, 1, W)
+    mask = (rows >= ys) & (rows < ys + ph) & (cols >= xs) & (cols < xs + pw)
+    mask &= (torch.rand(B, 1, 1, device=dev) < cutout_p)
+    x = x.masked_fill(mask.unsqueeze(1), 0.5)
+    return x.clamp_(0, 1)
+ 
+
 def to_model_input(x_uint8, device):
     """uint8 (B,3,H,W) -> float normalisé ImageNet, directement sur le GPU."""
     mean = torch.tensor(IMAGENET_MEAN, device=device).view(1, 3, 1, 1)
